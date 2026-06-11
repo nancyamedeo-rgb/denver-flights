@@ -508,26 +508,51 @@ function renderPlanes(states) {
 }
 
 // ── AviationStack flights ─────────────────────────────────────────────────────
+// Free tier requires HTTP (not HTTPS). We route through allorigins to handle CORS.
 async function fetchFlights() {
   if (!apiKey) return [];
 
-  const base  = `https://api.aviationstack.com/v1/flights?access_key=${apiKey}&arr_iata=DEN&dep_iata=DEN&limit=50`;
-  // Fetch arrivals and departures separately, then merge
-  const [arrRes, depRes] = await Promise.allSettled([
-    fetch(PROXY(`https://api.aviationstack.com/v1/flights?access_key=${apiKey}&arr_iata=DEN&limit=30`)),
-    fetch(PROXY(`https://api.aviationstack.com/v1/flights?access_key=${apiKey}&dep_iata=DEN&limit=30`)),
-  ]);
+  const proxies = [
+    u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
+    u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+  ];
 
-  const flights = [];
+  const base = `http://api.aviationstack.com/v1/flights?access_key=${apiKey}`;
+  const arrUrl = `${base}&arr_iata=DEN&limit=25`;
+  const depUrl = `${base}&dep_iata=DEN&limit=25`;
 
-  for (const r of [arrRes, depRes]) {
-    if (r.status !== 'fulfilled') continue;
-    const j = await r.value.json();
-    const d = JSON.parse(j.contents);
-    if (d.data) flights.push(...d.data);
+  // Try each proxy until one works
+  for (const makeProxy of proxies) {
+    try {
+      const [arrRes, depRes] = await Promise.all([
+        fetch(makeProxy(arrUrl)),
+        fetch(makeProxy(depUrl)),
+      ]);
+
+      const flights = [];
+
+      for (const res of [arrRes, depRes]) {
+        if (!res.ok) continue;
+        const wrapper = await res.json();
+        // allorigins wraps in {contents, status}; corsproxy returns raw
+        const raw  = wrapper.contents !== undefined ? wrapper.contents : JSON.stringify(wrapper);
+        const data = JSON.parse(raw);
+
+        if (data.error) {
+          console.error('AviationStack error:', data.error);
+          throw new Error(data.error.info || 'API error');
+        }
+        if (data.data) flights.push(...data.data);
+      }
+
+      if (flights.length > 0) return flights;
+    } catch(e) {
+      console.warn('Proxy attempt failed:', e.message);
+    }
   }
 
-  return flights;
+  // All proxies failed — throw so loadAll shows the error state
+  throw new Error('All proxy attempts failed');
 }
 
 function flightStatus(f) {
@@ -647,6 +672,7 @@ function setTab(tab) {
 // ── API key ───────────────────────────────────────────────────────────────────
 function saveKey() {
   apiKey = document.getElementById('api-key-input').value.trim();
+  if (!apiKey) return;
   localStorage.setItem('aviationstack_key', apiKey);
   document.getElementById('api-notice').style.display = 'none';
   loadAll();
@@ -684,10 +710,23 @@ async function loadAll() {
       document.getElementById('api-notice').style.display = 'block';
       wrap.innerHTML = `<div class="empty-state">Enter your AviationStack key above<br>to see arrivals & departures.<br><br>Aircraft positions load automatically<br>from OpenSky — no key needed.</div>`;
     } else {
-      wrap.innerHTML = `<div class="error-state">Could not load flight data.<br>Check your API key and try again.</div>`;
+      const errMsg = flightResult.reason?.message || 'Unknown error';
+      const isKeyErr = errMsg.toLowerCase().includes('api') || errMsg.toLowerCase().includes('key') || errMsg.toLowerCase().includes('invalid') || errMsg.toLowerCase().includes('access');
+      document.getElementById('api-notice').style.display = 'block';
+      wrap.innerHTML = `<div class="error-state">
+        Flight data failed to load.<br><br>
+        <span style="color:var(--muted);font-size:10px">${esc(errMsg)}</span><br><br>
+        ${isKeyErr
+          ? 'Double-check your API key — paste it again above.'
+          : 'This may be a proxy or network issue. Try refreshing.'}
+        <br><br>
+        <span style="color:var(--muted);font-size:10px">
+          Aircraft radar still works above (OpenSky, no key needed).
+        </span>
+      </div>`;
     }
     dot.className = 'status-dot';
-    stat.textContent = skyResult.status === 'fulfilled' ? 'Aircraft only' : 'Error';
+    stat.textContent = skyResult.status === 'fulfilled' ? 'Aircraft only (no flight data)' : 'Connection error';
   }
 
   btn.classList.remove('spinning');
