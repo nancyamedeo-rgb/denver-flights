@@ -500,12 +500,17 @@ function renderPlanes(aircraft) {
 async function fetchFlights() {
   if (!apiKey) return [];
 
-  // Try direct HTTPS first (works on most devices including Samsung TVs),
-  // then fall back to CORS proxies if blocked
+  // AviationStack free tier: HTTPS for direct calls, HTTP when going via proxy
+  const httpsBase = `https://api.aviationstack.com/v1/flights?access_key=${apiKey}`;
+  const httpBase  = `http://api.aviationstack.com/v1/flights?access_key=${apiKey}`;
+
   const attempts = [
-    // 1. Direct HTTPS — cleanest, no proxy needed
-    async (arrUrl, depUrl) => {
-      const [a, d] = await Promise.all([fetch(arrUrl), fetch(depUrl)]);
+    // 1. Direct HTTPS — no proxy, works on devices with good CORS support
+    async () => {
+      const [a, d] = await Promise.all([
+        fetch(`${httpsBase}&arr_iata=DEN&limit=25`),
+        fetch(`${httpsBase}&dep_iata=DEN&limit=25`),
+      ]);
       const flights = [];
       for (const res of [a, d]) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -515,13 +520,16 @@ async function fetchFlights() {
       }
       return flights;
     },
-    // 2. allorigins proxy
-    async (arrUrl, depUrl) => {
+    // 2. allorigins proxy with HTTP base
+    async () => {
       const proxy = u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`;
-      const [a, d] = await Promise.all([fetch(proxy(arrUrl)), fetch(proxy(depUrl))]);
+      const [a, d] = await Promise.all([
+        fetch(proxy(`${httpBase}&arr_iata=DEN&limit=25`)),
+        fetch(proxy(`${httpBase}&dep_iata=DEN&limit=25`)),
+      ]);
       const flights = [];
       for (const res of [a, d]) {
-        if (!res.ok) throw new Error(`Proxy HTTP ${res.status}`);
+        if (!res.ok) throw new Error(`allorigins ${res.status}`);
         const wrapper = await res.json();
         const raw  = wrapper.contents !== undefined ? wrapper.contents : JSON.stringify(wrapper);
         const data = JSON.parse(raw);
@@ -530,13 +538,16 @@ async function fetchFlights() {
       }
       return flights;
     },
-    // 3. corsproxy.io
-    async (arrUrl, depUrl) => {
+    // 3. corsproxy.io with HTTP base
+    async () => {
       const proxy = u => `https://corsproxy.io/?${encodeURIComponent(u)}`;
-      const [a, d] = await Promise.all([fetch(proxy(arrUrl)), fetch(proxy(depUrl))]);
+      const [a, d] = await Promise.all([
+        fetch(proxy(`${httpBase}&arr_iata=DEN&limit=25`)),
+        fetch(proxy(`${httpBase}&dep_iata=DEN&limit=25`)),
+      ]);
       const flights = [];
       for (const res of [a, d]) {
-        if (!res.ok) throw new Error(`Proxy HTTP ${res.status}`);
+        if (!res.ok) throw new Error(`corsproxy ${res.status}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error.info || 'API error');
         if (data.data) flights.push(...data.data);
@@ -545,13 +556,9 @@ async function fetchFlights() {
     },
   ];
 
-  const base   = `https://api.aviationstack.com/v1/flights?access_key=${apiKey}`;
-  const arrUrl = `${base}&arr_iata=DEN&limit=25`;
-  const depUrl = `${base}&dep_iata=DEN&limit=25`;
-
   for (const attempt of attempts) {
     try {
-      const flights = await attempt(arrUrl, depUrl);
+      const flights = await attempt();
       if (flights.length > 0) return flights;
     } catch(e) {
       console.warn('Attempt failed:', e.message);
